@@ -328,19 +328,6 @@ echo "$STAGED_FILES" | xargs git add
 
 exit 0
 ```
----
-
-<div align="center">
-
-### Made with ❤️ by
-
-![Your Logo](your-logo.svg)
-
-</div> | while read file; do
-  node ./serisei-formatter.js "$file"
-  git add "$file"
-done
-```
 
 ## 🐛 Troubleshooting
 
