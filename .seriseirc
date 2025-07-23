@@ -1,0 +1,8 @@
+# .seriseirc — Sample file
+# Defaults
+# HEADER_CHAR = =
+# TO_COLUMN_WIDTH = 120
+
+[groups]
+# Use quotes to match the exact package name
+#// EXTERNAL = "react", "react-router-dom", next
