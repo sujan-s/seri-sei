@@ -293,7 +293,7 @@ Add to `.vscode/tasks.json`:
         {
             "label"          : "Format with Serisei",
             "type"           : "shell",
-            "command"        : "serisei", // Using the global command
+            "command"        : "serisei",
             "args"           : [
                 "${file}"
             ],
@@ -454,13 +454,13 @@ MIT. Have at it.
 
 ---
 
-<div align="center">
-
 ### Made with ❤️ by
-
-<img
-    src="https://s3.ap-south-1.amazonaws.com/sujansundareswaran.com/images-cdn/sujan-logo.svg"
-    alt="Sujan Sundareswaran logo" width="120"
-/>
-
+<div>
+    <a href="https://sujansundareswaran.com/" target="_blank">
+        <img
+            src="https://s3.ap-south-1.amazonaws.com/sujansundareswaran.com/images-cdn/sujan-logo.svg"
+            alt="Sujan logo"
+            width="64"
+        />
+    </a>
 </div>
