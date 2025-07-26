@@ -7,7 +7,7 @@ const { parse } = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 const generate = require("@babel/generator").default;
 
-/**
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  * Loads configuration by searching upwards from a starting directory for a .seriseirc file.
  * Falls back to default values if no config file is found.
  * @param {string} startPath The path of the file being processed.
@@ -140,7 +140,7 @@ const loadConfig = (startPath) => {
     return config;
 };
 
-/**
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  * AST-based import extraction function.
  * Collects ALL imports and identifies the exact lines they occupy.
  * @param {string} code - The source code content
@@ -179,14 +179,14 @@ const extractImports = (code, config) => {
                 // Track the first and last import lines
                 const importStartLine = node.loc.start.line - 1; // Convert to 0-based
                 const importEndLine = node.loc.end.line - 1; // Convert to 0-based
-                
+
                 if (firstImportLine === -1 || importStartLine < firstImportLine) {
                     firstImportLine = importStartLine;
                 }
                 if (lastImportLine === -1 || importEndLine > lastImportLine) {
                     lastImportLine = importEndLine;
                 }
-                
+
                 // Add every line occupied by this import to the set for removal.
                 for (let i = importStartLine; i <= importEndLine; i++) {
                     linesToRemove.add(i);
@@ -220,7 +220,7 @@ const extractImports = (code, config) => {
                     break;
                 }
             }
-            
+
             // Look for the end of the import block
             let blockEnd = lastImportLine;
             for (let i = lastImportLine + 1; i < lines.length; i++) {
@@ -231,7 +231,7 @@ const extractImports = (code, config) => {
                     break;
                 }
             }
-            
+
             // Add all lines in the import block to linesToRemove
             for (let i = blockStart; i <= blockEnd; i++) {
                 linesToRemove.add(i);
@@ -242,7 +242,7 @@ const extractImports = (code, config) => {
         // Remove leading comments to avoid duplicating file headers
         const importStatements = importNodes.map((node) => {
             // Clear leading comments to prevent duplication
-            const nodeCopy = { ...node, leadingComments: null };
+            const nodeCopy = { ...node, leadingComments : null };
             return generate(nodeCopy, { compact : false }).code;
         });
 
@@ -251,11 +251,97 @@ const extractImports = (code, config) => {
     } catch (error) {
         console.error(`Failed to parse file with AST: ${error.message}`);
         // Return empty results on parse error
-        return { importStatements: [], linesToRemove: new Set() };
+        return { importStatements : [], linesToRemove : new Set() };
     }
 };
 
-/**
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ * AST-based interface/type extraction function.
+ * Collects ALL interface and type declarations and identifies the exact lines they occupy.
+ * @param {string} code - The source code content
+ * @returns {{interfaceBlocks: Array<{node: object, startLine: number, endLine: number}>, linesToRemove: Set<number>}}
+ */
+const extractInterfaceBlocks = (code) => {
+    try {
+        const ast = parse(code, {
+            sourceType : "module",
+            plugins    : [
+                "typescript",
+                "jsx",
+                "decorators-legacy",
+                "classProperties",
+                "objectRestSpread",
+                "asyncGenerators",
+                "functionBind",
+                "exportDefaultFrom",
+                "exportNamespaceFrom",
+                "dynamicImport",
+                "nullishCoalescingOperator",
+                "optionalChaining",
+            ],
+        });
+
+        const interfaceBlocks = [];
+        const linesToRemove = new Set();
+
+        traverse(ast, {
+            TSInterfaceDeclaration(path) {
+                const node = path.node;
+                const startLine = node.loc.start.line - 1; // Convert to 0-based
+                const endLine = node.loc.end.line - 1; // Convert to 0-based
+
+                interfaceBlocks.push({ node, startLine, endLine });
+
+                // Add every line occupied by this interface to the set for removal
+                for (let i = startLine; i <= endLine; i++) {
+                    linesToRemove.add(i);
+                }
+            },
+            TSTypeAliasDeclaration(path) {
+                const node = path.node;
+                const startLine = node.loc.start.line - 1; // Convert to 0-based
+                const endLine = node.loc.end.line - 1; // Convert to 0-based
+
+                interfaceBlocks.push({ node, startLine, endLine });
+
+                // Add every line occupied by this type to the set for removal
+                for (let i = startLine; i <= endLine; i++) {
+                    linesToRemove.add(i);
+                }
+            },
+            ExportNamedDeclaration(path) {
+                const node = path.node;
+                // Check if this is an exported interface or type
+                if (node.declaration &&
+                    (node.declaration.type === "TSInterfaceDeclaration" ||
+                        node.declaration.type === "TSTypeAliasDeclaration"
+                    )) {
+                    const startLine = node.loc.start.line - 1; // Convert to 0-based
+                    const endLine = node.loc.end.line - 1; // Convert to 0-based
+
+                    interfaceBlocks.push({ node, startLine, endLine });
+
+                    // Add every line occupied by this exported interface/type to the set for removal
+                    for (let i = startLine; i <= endLine; i++) {
+                        linesToRemove.add(i);
+                    }
+                    
+                    // Skip the inner declaration to avoid double-counting
+                    path.skip();
+                }
+            },
+        });
+
+        return { interfaceBlocks, linesToRemove };
+
+    } catch (error) {
+        console.error(`Failed to parse file with AST for interfaces: ${error.message}`);
+        // Return empty results on parse error
+        return { interfaceBlocks : [], linesToRemove : new Set() };
+    }
+};
+
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  * Takes raw import statements and returns formatted, grouped, and sorted lines.
  * @param {string[]} importStatements - Array of import statements.
  * @param {object} config - The configuration object.
@@ -305,7 +391,478 @@ const groupAndFormatImports = (importStatements, config) => {
 };
 
 
-/**
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ * Formats interface blocks using AST nodes.
+ * @param {Array<{node: object, startLine: number, endLine: number}>} interfaceBlocks - Array of interface block data
+ * @param {string[]} originalLines - The original file lines
+ * @returns {Array<{startLine: number, endLine: number, formattedLines: string[]}>} Formatted interface blocks
+ */
+const formatInterfaceBlocks = (interfaceBlocks, originalLines) => {
+    const formattedBlocks = [];
+
+    for (const block of interfaceBlocks) {
+        const { node, startLine, endLine } = block;
+
+        // Extract the original lines for this interface/type block
+        const blockLines = [];
+        for (let i = startLine; i <= endLine; i++) {
+            blockLines.push(originalLines[i]);
+        }
+
+        // Get the base indentation from the first line
+        const baseIndent = (blockLines[0].match(/^\s*/) || [""]
+        )[0];
+
+        // Find the opening brace position
+        let braceLineIndex = -1;
+        let braceColumnIndex = -1;
+        for (let i = 0; i < blockLines.length; i++) {
+            const braceIndex = blockLines[i].indexOf("{");
+            if (braceIndex !== -1) {
+                braceLineIndex = i;
+                braceColumnIndex = braceIndex;
+                break;
+            }
+        }
+
+        // If no opening brace found, this might be a simple type alias
+        if (braceLineIndex === -1) {
+            // For type aliases without braces, just keep the original formatting
+            formattedBlocks.push({
+                startLine,
+                endLine,
+                formattedLines : blockLines,
+            });
+            continue;
+        }
+
+        // Extract the content between braces
+        const blockContent = [];
+        let foundContent = false;
+
+        // Start from the line after the opening brace
+        let contentStartLine = braceLineIndex;
+        let contentEndLine = blockLines.length - 1;
+
+        // If the opening brace is at the end of the first line, start from next line
+        if (braceColumnIndex < blockLines[braceLineIndex].length - 1) {
+            // There's content after the opening brace on the same line
+            const afterBrace = blockLines[braceLineIndex].substring(braceColumnIndex + 1).trim();
+            if (afterBrace && !afterBrace.startsWith("}")) {
+                blockContent.push(baseIndent + "    " + afterBrace);
+                foundContent = true;
+            }
+        }
+
+        // Process middle lines (between first and last)
+        for (let i = braceLineIndex + 1; i < blockLines.length - 1; i++) {
+            blockContent.push(blockLines[i]);
+            if (blockLines[i].trim() !== "") {
+                foundContent = true;
+            }
+        }
+
+        // Handle the last line if it contains content before the closing brace
+        if (blockLines.length > 1) {
+            const lastLine = blockLines[blockLines.length - 1];
+            const closingBraceIndex = lastLine.lastIndexOf("}");
+            if (closingBraceIndex > 0) {
+                const beforeBrace = lastLine.substring(0, closingBraceIndex).trim();
+                if (beforeBrace) {
+                    blockContent.push(baseIndent + "    " + beforeBrace);
+                    foundContent = true;
+                }
+            }
+        }
+
+        // Format the block content
+        let formattedContent = [];
+        if (foundContent && blockContent.some(line => line.trim() !== "")) {
+            formattedContent = formatBlockContent(blockContent, baseIndent);
+        }
+
+        // Reconstruct the formatted block
+        const formattedLines = [];
+
+        // Add all lines before the brace line as-is (handles multi-line declarations)
+        for (let i = 0; i < braceLineIndex; i++) {
+            formattedLines.push(blockLines[i]);
+        }
+
+        // Add the header line (everything up to and including the opening brace)
+        const headerLine = blockLines[braceLineIndex].substring(0, braceColumnIndex + 1);
+        formattedLines.push(headerLine);
+
+        // Add the formatted content
+        formattedLines.push(...formattedContent);
+
+        // Add the closing brace line
+        const lastLine = blockLines[blockLines.length - 1];
+        const closingBraceIndex = lastLine.lastIndexOf("}");
+        const closingLine = baseIndent + lastLine.substring(closingBraceIndex);
+        formattedLines.push(closingLine);
+
+        formattedBlocks.push({
+            startLine,
+            endLine,
+            formattedLines,
+        });
+    }
+
+    return formattedBlocks;
+};
+
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ * Parses parameter string into structured format
+ * @param {string} parametersStr - The parameters string to parse
+ * @returns {Array<{name: string, optional: boolean, type: string}>} Parsed parameters
+ */
+const parseParameters = (parametersStr) => {
+    const parameters = [];
+    let currentParam = "";
+    let depth = 0;
+    let inString = false;
+    let stringChar = "";
+
+    for (let i = 0; i < parametersStr.length; i++) {
+        const char = parametersStr[i];
+        const prevChar = i > 0 ? parametersStr[i - 1] : "";
+
+        // Handle string literals
+        if ((char === "\"" || char === "'"
+        ) && prevChar !== "\\") {
+            if (!inString) {
+                inString = true;
+                stringChar = char;
+            } else if (char === stringChar) {
+                inString = false;
+            }
+        }
+
+        if (!inString) {
+            // Track nested structures
+            if (char === "(" || char === "{" || char === "<") depth++;
+            else if (char === ")" || char === "}" || char === ">") depth--;
+
+            // Split on comma only at depth 0
+            if (char === "," && depth === 0) {
+                if (currentParam.trim()) {
+                    parameters.push(parseParameter(currentParam.trim()));
+                }
+                currentParam = "";
+                continue;
+            }
+        }
+
+        currentParam += char;
+    }
+
+    // Don't forget the last parameter
+    if (currentParam.trim()) {
+        parameters.push(parseParameter(currentParam.trim()));
+    }
+
+    return parameters;
+};
+
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ * Parses a single parameter into name, optional flag, and type
+ * @param {string} param - The parameter string to parse
+ * @returns {{name: string, optional: boolean, type: string}} Parsed parameter
+ */
+const parseParameter = (param) => {
+    // Find the first colon that's not inside brackets
+    let colonIndex = -1;
+    let depth = 0;
+    let inString = false;
+    let stringChar = "";
+
+    for (let i = 0; i < param.length; i++) {
+        const char = param[i];
+        const prevChar = i > 0 ? param[i - 1] : "";
+
+        if ((char === "\"" || char === "'"
+        ) && prevChar !== "\\") {
+            if (!inString) {
+                inString = true;
+                stringChar = char;
+            } else if (char === stringChar) {
+                inString = false;
+            }
+        }
+
+        if (!inString) {
+            if (char === "(" || char === "{" || char === "<") depth++;
+            else if (char === ")" || char === "}" || char === ">") depth--;
+            else if (char === ":" && depth === 0) {
+                colonIndex = i;
+                break;
+            }
+        }
+    }
+
+    if (colonIndex === -1) {
+        return { name : param, optional : false, type : "" };
+    }
+
+    const namePart = param.substring(0, colonIndex).trim();
+    const typePart = param.substring(colonIndex + 1).trim();
+
+    // Check if parameter is optional
+    const optional = namePart.endsWith("?");
+    const name = optional ? namePart.slice(0, -1).trim() : namePart;
+
+    return { name, optional, type : typePart };
+};
+
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ * Parses and formats inline object types
+ * @param {string} objectType - The object type string
+ * @param {string} baseIndent - Base indentation
+ * @returns {string[]} Formatted lines
+ */
+const parseInlineObject = (objectType, baseIndent) => {
+    // For inline objects in parameters, format them on multiple lines
+    const lines = [];
+
+    // Find the opening brace
+    const braceIndex = objectType.indexOf("{");
+    if (braceIndex === -1) {
+        return [objectType];
+    }
+
+    const beforeBrace = objectType.substring(0, braceIndex).trim();
+    const afterBrace = objectType.substring(braceIndex);
+
+    // Extract object content
+    const objectContent = afterBrace.substring(1, afterBrace.lastIndexOf("}")).trim();
+    const afterObject = afterBrace.substring(afterBrace.lastIndexOf("}") + 1);
+
+    if (!objectContent) {
+        return [objectType];
+    }
+
+    // First line with opening brace
+    lines.push(beforeBrace + " {");
+
+    // Parse object properties
+    const properties = [];
+    let currentProp = "";
+    let depth = 0;
+
+    for (let i = 0; i < objectContent.length; i++) {
+        const char = objectContent[i];
+
+        if (char === "{" || char === "(" || char === "<") depth++;
+        else if (char === "}" || char === ")" || char === ">") depth--;
+
+        if ((char === ";" || char === ","
+        ) && depth === 0) {
+            if (currentProp.trim()) {
+                properties.push(currentProp.trim() + char);
+            }
+            currentProp = "";
+        } else {
+            currentProp += char;
+        }
+    }
+
+    if (currentProp.trim()) {
+        properties.push(currentProp.trim());
+    }
+
+    // Format each property with proper indentation
+    const propIndent = baseIndent + "        ";
+    for (const prop of properties) {
+        lines.push(propIndent + prop);
+    }
+
+    // Closing brace
+    lines.push(baseIndent + "    }" + afterObject);
+
+    return lines;
+};
+
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+ * Formats method signatures with proper parameter alignment and trailing commas.
+ * @param {string[]} methodLines - The lines of the method signature
+ * @param {string} propertyIndent - The base indentation for the method
+ * @param {string} alignedFirstLine - The first line with proper key alignment
+ * @returns {string[]} The formatted method lines
+ */
+const formatMethodSignature = (methodLines, propertyIndent, alignedFirstLine) => {
+    const formattedLines = [];
+
+    // Always format methods with multi-line parameters for consistency
+    // Even single-line methods should be expanded
+    
+    // For single-line methods, force multi-line format
+    if (methodLines.length === 1) {
+        // Extract everything we need from the single line
+        const singleLine = methodLines[0];
+        // The alignedFirstLine already has the proper formatting up to the colon
+    }
+
+
+    // Extract the aligned method name part from the first line
+    const colonIndex = alignedFirstLine.indexOf(" : ");
+    if (colonIndex === -1) {
+        // Fallback: just indent properly
+        formattedLines.push(alignedFirstLine);
+        for (let i = 1; i < methodLines.length; i++) {
+            formattedLines.push(propertyIndent + "    " + methodLines[i].trim());
+        }
+        return formattedLines;
+    }
+
+    const methodNamePart = alignedFirstLine.substring(0, colonIndex);
+
+    // Combine all lines and normalize whitespace
+    const fullSignature = methodLines.map(line => line.trim()).join(" ").replace(/\s+/g, " ");
+
+    // Extract the signature part after the key
+    const signatureMatch = fullSignature.match(/:\s*(.+)$/);
+    if (!signatureMatch) {
+        return methodLines.map((line, i) =>
+            i === 0 ? alignedFirstLine : propertyIndent + "    " + line.trim(),
+        );
+    }
+
+    const signature = signatureMatch[1];
+
+    // Find opening parenthesis
+    const openParenIndex = signature.indexOf("(");
+    if (openParenIndex === -1) {
+        // Not a method signature
+        return methodLines.map((line, i) =>
+            i === 0 ? alignedFirstLine : propertyIndent + "    " + line.trim(),
+        );
+    }
+
+    // Extract method name/generics and the rest
+    const methodPrefix = signature.substring(0, openParenIndex);
+
+    // Find the matching closing parenthesis
+    let parenDepth = 0;
+    let closeParenIndex = -1;
+    for (let i = openParenIndex; i < signature.length; i++) {
+        if (signature[i] === "(") parenDepth++;
+        else if (signature[i] === ")") {
+            parenDepth--;
+            if (parenDepth === 0) {
+                closeParenIndex = i;
+                break;
+            }
+        }
+    }
+
+    if (closeParenIndex === -1) {
+        // Malformed signature
+        return methodLines.map((line, i) =>
+            i === 0 ? alignedFirstLine : propertyIndent + "    " + line.trim(),
+        );
+    }
+
+    const parametersStr = signature.substring(openParenIndex + 1, closeParenIndex);
+    const returnType = signature.substring(closeParenIndex + 1);
+
+    // Start building the formatted output - add space before opening paren
+    // Handle generic parameters properly
+    const genericMatch = methodPrefix.match(/^(.+?)(<.+>)$/);
+    if (genericMatch) {
+        formattedLines.push(`${methodNamePart} : ${genericMatch[1]}${genericMatch[2]} (`);
+    } else {
+        formattedLines.push(`${methodNamePart} : ${methodPrefix} (`);
+    }
+
+    // Parse and format parameters
+    if (parametersStr.trim()) {
+        const parameters = parseParameters(parametersStr);
+        const paramIndent = propertyIndent + "    ";
+
+        // Calculate max lengths for alignment
+        let maxParamLength = 0;
+        let hasOptional = false;
+
+        for (const param of parameters) {
+            maxParamLength = Math.max(maxParamLength, param.name.length);
+            if (param.optional) hasOptional = true;
+        }
+
+        // Format each parameter
+        parameters.forEach((param, index) => {
+            let line = paramIndent + param.name.padEnd(maxParamLength);
+
+            if (hasOptional) {
+                line += param.optional ? " ?" : "  ";
+            }
+
+            line += " : " + param.type;
+
+            // Check if parameter type contains an inline object
+            if (param.type.includes("{") && param.type.includes("}")) {
+                // Format inline object types
+                const braceIndex = param.type.indexOf("{");
+                const beforeBrace = param.type.substring(0, braceIndex).trim();
+                const objectContent = param.type.substring(braceIndex);
+
+                // Extract properties from the inline object
+                const objMatch = objectContent.match(/^\{(.+)\}(.*)$/);
+                if (objMatch) {
+                    const props = objMatch[1].trim();
+                    const afterObj = objMatch[2];
+
+                    // Add the parameter line with opening brace
+                    formattedLines.push(line.substring(0, line.lastIndexOf(":") + 1) + " " + beforeBrace + " {");
+
+                    // Parse and format object properties
+                    const objPropIndent = paramIndent + "        ";
+                    const properties = props.split(/[;,]/).filter(p => p.trim());
+
+                    // Calculate alignment for object properties
+                    let maxPropLength = 0;
+                    const parsedProps = [];
+
+                    for (const prop of properties) {
+                        const colonIdx = prop.indexOf(":");
+                        if (colonIdx > 0) {
+                            const propName = prop.substring(0, colonIdx).trim();
+                            const propType = prop.substring(colonIdx + 1).trim();
+                            maxPropLength = Math.max(maxPropLength, propName.length);
+                            parsedProps.push({ name : propName, type : propType });
+                        }
+                    }
+
+                    // Format object properties with alignment
+                    parsedProps.forEach((prop, propIndex) => {
+                        const isLastProp = propIndex === parsedProps.length - 1;
+                        formattedLines.push(
+                            `${objPropIndent}${prop.name.padEnd(maxPropLength)} : ${prop.type}${isLastProp ? "" : ";"}`,
+                        );
+                    });
+
+                    // Close the object
+                    formattedLines.push(`${paramIndent}    }${afterObj}${index < parameters.length - 1 ? "," : ""}`);
+                } else {
+                    // Fallback for complex cases
+                    formattedLines.push(line + (index < parameters.length - 1 ? "," : ""
+                    ));
+                }
+            } else {
+                // Regular parameter without inline object
+                formattedLines.push(line + (index < parameters.length - 1 ? "," : ""
+                ));
+            }
+        });
+    }
+
+    // Close parentheses and add return type
+    formattedLines.push(`${propertyIndent})${returnType}`);
+
+    return formattedLines;
+};
+
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  * Recursively formats the content of a type or interface block.
  * @param {string[]} blockContentLines - The lines of code inside the { ... } block.
  * @param {string} baseIndent - The base indentation of the parent block.
@@ -317,8 +874,73 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
     let braceDepth = 0;
     let parenDepth = 0;
 
-    // Delimit properties, correctly handling multi-line nested objects and function signatures.
+    // First, split lines that contain multiple semicolon-separated properties
+    const expandedLines = [];
     for (const line of blockContentLines) {
+        if (line.trim() === "") {
+            expandedLines.push(line);
+            continue;
+        }
+
+        // Check if line contains multiple properties separated by semicolons
+        // Only split if we're not inside braces/parens and there are multiple semicolons
+        const trimmedLine = line.trim();
+        if (trimmedLine.includes(";") && !trimmedLine.startsWith("//") && !trimmedLine.startsWith("/*")) {
+            // Check if semicolons are inside braces - if so, don't split
+            let braceDepth = 0;
+            let shouldSplit = false;
+
+            for (let j = 0; j < trimmedLine.length; j++) {
+                const char = trimmedLine[j];
+                if (char === "{") braceDepth++;
+                else if (char === "}") braceDepth--;
+                else if (char === ";" && braceDepth === 0) {
+                    // Found a semicolon outside of braces
+                    shouldSplit = true;
+                    break;
+                }
+            }
+
+            if (shouldSplit) {
+                // Split by semicolon but preserve the base indentation
+                const baseIndent = (line.match(/^\s*/) || [""]
+                )[0];
+                const parts = [];
+                let currentPart = "";
+                let braceDepth = 0;
+
+                for (let j = 0; j < trimmedLine.length; j++) {
+                    const char = trimmedLine[j];
+                    currentPart += char;
+
+                    if (char === "{") braceDepth++;
+                    else if (char === "}") braceDepth--;
+                    else if (char === ";" && braceDepth === 0) {
+                        parts.push(currentPart);
+                        currentPart = "";
+                    }
+                }
+
+                if (currentPart.trim()) {
+                    parts.push(currentPart);
+                }
+
+                for (let i = 0; i < parts.length; i++) {
+                    const part = parts[i].trim();
+                    if (part) {
+                        expandedLines.push(baseIndent + part);
+                    }
+                }
+            } else {
+                expandedLines.push(line);
+            }
+        } else {
+            expandedLines.push(line);
+        }
+    }
+
+    // Delimit properties, correctly handling multi-line nested objects and function signatures.
+    for (const line of expandedLines) {
         if (line.trim() === "" && currentPropLines.length === 0) continue;
 
         currentPropLines.push(line);
@@ -360,7 +982,8 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
     const formattedLines = [];
 
     // Format each property
-    for (const prop of properties) {
+    for (let propIndex = 0; propIndex < properties.length; propIndex++) {
+        const prop = properties[propIndex];
         const firstLine = prop[0];
         const trimmedFirstLine = firstLine.trim();
 
@@ -378,11 +1001,30 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
         }
 
         const [, key, optional, value] = match;
-        const paddedKey = key.padEnd(maxKeyLength);
-        const alignedFirstLine = `${propertyIndent}${paddedKey}${hasOptional ? (optional ? " ?" : "  "
-        ) : ""} : ${value}`;
 
-        if (prop.length === 1) {
+        // Check if this is a method (contains parentheses)
+        const isMethod = value.includes("(") || (prop.length > 1 && prop.some(line => line.includes("(")));
+
+        // Add spacing before methods (except the first property)
+        if (isMethod && propIndex > 0 && formattedLines.length > 0) {
+            formattedLines.push("");
+        }
+        const paddedKey = key.padEnd(maxKeyLength);
+        // For methods, we need to add space before the parenthesis
+        let formattedValue = value;
+        if (isMethod) {
+            // Add space before opening parenthesis if not already present
+            formattedValue = value.replace(/(\S)\(/, '$1 (');
+        }
+        
+        const alignedFirstLine = `${propertyIndent}${paddedKey}${hasOptional ? (optional ? " ?" : "  "
+        ) : ""} : ${formattedValue}`;
+
+        if (isMethod) {
+            // Always use method formatter for methods
+            const methodFormattedLines = formatMethodSignature(prop, propertyIndent, alignedFirstLine);
+            formattedLines.push(...methodFormattedLines);
+        } else if (prop.length === 1) {
             formattedLines.push(alignedFirstLine);
         } else {
             // This is a multi-line property.
@@ -390,12 +1032,9 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
 
             if (openingBraceIndex === -1) {
                 // This is not a nested object, but a multi-line signature or other construct.
-                // Format the first line and then indent the subsequent lines.
-                formattedLines.push(alignedFirstLine);
-                for (let i = 1; i < prop.length; i++) {
-                    // Indent subsequent lines of the property.
-                    formattedLines.push(propertyIndent + "    " + prop[i].trim());
-                }
+                // Use the method signature formatter
+                const methodFormattedLines = formatMethodSignature(prop, propertyIndent, alignedFirstLine);
+                formattedLines.push(...methodFormattedLines);
             } else {
                 // This is a nested object. Format it recursively.
                 const firstLineHeader = alignedFirstLine.substring(0, alignedFirstLine.lastIndexOf("{") + 1);
@@ -417,7 +1056,7 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
 };
 
 
-/**
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  * Write file atomically to avoid conflicts with IDEs
  * @param {string} filePath - Path to write to
  * @param {string} content - Content to write
@@ -439,7 +1078,7 @@ const writeFileAtomic = (filePath, content) => {
     }
 };
 
-/**
+/** ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
  * Read the file, apply formatting, and write back if changed.
  * This version uses the AST to remove all imports and re-insert a formatted block at the top.
  * @param {string} filePath The path of the file to process.
@@ -451,41 +1090,64 @@ const processFile = (filePath) => {
         const lines = originalCode.split("\n");
 
         // Step 1: Extract imports and get the set of lines to remove
-        const { importStatements, linesToRemove } = extractImports(originalCode, config);
+        const { importStatements, linesToRemove : importLinesToRemove } = extractImports(originalCode, config);
 
-        if (importStatements.length === 0) {
-            // No imports found, no need to format anything.
-            return;
+        // Step 2: Extract interface/type blocks and get their lines to remove
+        const { interfaceBlocks, linesToRemove : interfaceLinesToRemove } = extractInterfaceBlocks(originalCode);
+        
+
+        // Combine all lines to remove (imports + interfaces)
+        const allLinesToRemove = new Set([...importLinesToRemove, ...interfaceLinesToRemove]);
+
+        // If we failed to parse the file (both imports and interfaces are empty but file has content),
+        // don't proceed as it might wipe the file
+        if (importStatements.length === 0 && interfaceBlocks.length === 0 && allLinesToRemove.size === 0) {
+            const hasContent = lines.some(line => line.trim() && !line.trim().startsWith("//"));
+            if (hasContent) {
+                // File has content but nothing was extracted - likely a parse error
+                // Don't format to avoid wiping the file
+                return;
+            }
         }
 
-        // Step 2: Get the formatted import block
-        const newImportLines = groupAndFormatImports(importStatements, config);
+        // Step 3: Get the formatted import block
+        const newImportLines = importStatements.length > 0 ? groupAndFormatImports(importStatements, config) : [];
 
-        // Step 3: Reconstruct the file
+        // Step 4: Get the formatted interface blocks
+        const formattedInterfaceBlocks = interfaceBlocks.length > 0 ? formatInterfaceBlocks(interfaceBlocks, lines) : [];
+
+        // Step 5: Reconstruct the file
         const finalLines = [];
 
         // Find the end of the file header (comments/empty lines/directives at the top)
         let headerEndIndex = 0;
         let foundFirstImport = false;
+        let foundFirstInterface = false;
+        
         for (let i = 0; i < lines.length; i++) {
             const trimmedLine = lines[i].trim();
-            
+
             // Check if this is an import line
-            if (linesToRemove.has(i) && trimmedLine.startsWith("import")) {
+            if (allLinesToRemove.has(i) && trimmedLine.startsWith("import")) {
                 foundFirstImport = true;
-            }
-            
-            // Check if this is a directive (string literal at the top level)
-            const isDirective = /^["']use (client|server|strict)["'];?$/.test(trimmedLine);
-            
-            // Stop at the first import or first non-comment/non-directive code
-            if (foundFirstImport || (trimmedLine !== "" && !trimmedLine.startsWith("//") && !trimmedLine.startsWith("/*") && !isDirective && !linesToRemove.has(i))) {
                 break;
             }
             
-            if (!linesToRemove.has(i)) {
-                finalLines.push(lines[i]);
+            // Check if this is an interface/type line
+            if (interfaceLinesToRemove.has(i)) {
+                foundFirstInterface = true;
+                break;
             }
+
+            // Check if this is a directive (string literal at the top level)
+            const isDirective = /^["']use (client|server|strict)["'];?$/.test(trimmedLine);
+
+            // Stop at the first import or first non-comment/non-directive code
+            if (trimmedLine !== "" && !trimmedLine.startsWith("//") && !trimmedLine.startsWith("/*") && !isDirective) {
+                break;
+            }
+
+            finalLines.push(lines[i]);
             headerEndIndex = i + 1;
         }
 
@@ -499,11 +1161,15 @@ const processFile = (filePath) => {
         }
 
         // Check if there is subsequent code to add a separator line
+        // Skip comments and empty lines when determining if there's subsequent code
         let hasSubsequentCode = false;
         for (let i = headerEndIndex; i < lines.length; i++) {
-            if (!linesToRemove.has(i) && lines[i].trim() !== "") {
-                hasSubsequentCode = true;
-                break;
+            if (!allLinesToRemove.has(i)) {
+                const line = lines[i].trim();
+                if (line !== "" && !line.startsWith("//") && !line.startsWith("/*")) {
+                    hasSubsequentCode = true;
+                    break;
+                }
             }
         }
 
@@ -511,63 +1177,33 @@ const processFile = (filePath) => {
             finalLines.push("");
         }
 
-        // Process the rest of the file, skipping old import lines
-        for (let i = headerEndIndex; i < lines.length; i++) {
-            if (linesToRemove.has(i)) {
+        // Create a map of interface block start lines to their formatted versions
+        const interfaceBlockMap = new Map();
+        for (const block of formattedInterfaceBlocks) {
+            interfaceBlockMap.set(block.startLine, block);
+        }
+
+        // Process the rest of the file, inserting formatted interface blocks at their original positions
+        let i = headerEndIndex;
+        while (i < lines.length) {
+            // Check if this line is the start of a formatted interface block
+            if (interfaceBlockMap.has(i)) {
+                const block = interfaceBlockMap.get(i);
+                finalLines.push(...block.formattedLines);
+                // Skip to the end of the original block
+                i = block.endLine + 1;
                 continue;
             }
 
-            const line = lines[i];
-            const isBlockStart = /^\s*(export\s+)?(interface|type)\s+[\w$]+.*\{/.test(line.trim());
-
-            if (!isBlockStart) {
-                finalLines.push(line);
+            // If this line should be removed (import or interface content), skip it
+            if (allLinesToRemove.has(i)) {
+                i++;
                 continue;
             }
 
-            // The rest of this logic is the original, known-good type/interface formatter
-            const baseIndent = (line.match(/^\s*/) || [""]
-            )[0];
-            let braceDepth = 0;
-            let blockEndIndex = -1;
-            for (let j = i; j < lines.length; j++) {
-                if (!linesToRemove.has(j)) { // Ensure we don't look inside an old import
-                    braceDepth += (lines[j].match(/\{/g) || []
-                    ).length;
-                    braceDepth -= (lines[j].match(/\}/g) || []
-                    ).length;
-                }
-                if (braceDepth === 0) {
-                    blockEndIndex = j;
-                    break;
-                }
-            }
-
-            if (blockEndIndex === -1) {
-                finalLines.push(line); // Unclosed block
-                continue;
-            }
-
-            const blockHeader = lines[i];
-            const blockFooter = lines[blockEndIndex];
-
-            // Extract content, making sure to skip any import lines that might be inside
-            const blockContent = [];
-            for (let k = i + 1; k < blockEndIndex; k++) {
-                if (!linesToRemove.has(k)) {
-                    blockContent.push(lines[k]);
-                }
-            }
-
-            finalLines.push(blockHeader);
-            if (blockContent.some((l) => l.trim() !== "")) {
-                finalLines.push(...formatBlockContent(blockContent, baseIndent));
-            } else {
-                finalLines.push(...blockContent);
-            }
-            finalLines.push(blockFooter);
-
-            i = blockEndIndex;
+            // For all other lines, just add them as-is
+            finalLines.push(lines[i]);
+            i++;
         }
 
         const newCode = finalLines.join("\n");
@@ -585,7 +1221,7 @@ const processFile = (filePath) => {
     }
 };
 
-// Main execution
+// Main execution //////////////////////////////////////////////////////////////////////////////////////////////////////
 const filePath = process.argv[2];
 if (!filePath) {
     console.error("Please provide a file path to format.");
