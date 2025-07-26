@@ -1,3 +1,6 @@
+## v0.1.2
+#### Migrate from regex to AST for interface/type block parsing
+
 ## v0.1.1
 #### Migrate from regex to AST for more accurate imports parsing
 

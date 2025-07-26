@@ -17,6 +17,7 @@ const loadConfig = (startPath) => {
     const defaultConfig = {
         HEADER_CHAR     : "=",
         TO_COLUMN_WIDTH : 120,
+        EXPAND_METHODS  : true,  // Always expand methods to multi-line format
         groups          : [
             {
                 name     : "// EXTERNAL ",
@@ -123,6 +124,8 @@ const loadConfig = (startPath) => {
                     config.TO_COLUMN_WIDTH = parseInt(value, 10) || defaultConfig.TO_COLUMN_WIDTH;
                 } else if (key === "HEADER_CHAR") {
                     config.HEADER_CHAR = value || defaultConfig.HEADER_CHAR;
+                } else if (key === "EXPAND_METHODS") {
+                    config.EXPAND_METHODS = value.toLowerCase() === "true";
                 }
             }
         }
@@ -325,7 +328,7 @@ const extractInterfaceBlocks = (code) => {
                     for (let i = startLine; i <= endLine; i++) {
                         linesToRemove.add(i);
                     }
-                    
+
                     // Skip the inner declaration to avoid double-counting
                     path.skip();
                 }
@@ -397,7 +400,7 @@ const groupAndFormatImports = (importStatements, config) => {
  * @param {string[]} originalLines - The original file lines
  * @returns {Array<{startLine: number, endLine: number, formattedLines: string[]}>} Formatted interface blocks
  */
-const formatInterfaceBlocks = (interfaceBlocks, originalLines) => {
+const formatInterfaceBlocks = (interfaceBlocks, originalLines, config) => {
     const formattedBlocks = [];
 
     for (const block of interfaceBlocks) {
@@ -478,7 +481,7 @@ const formatInterfaceBlocks = (interfaceBlocks, originalLines) => {
         // Format the block content
         let formattedContent = [];
         if (foundContent && blockContent.some(line => line.trim() !== "")) {
-            formattedContent = formatBlockContent(blockContent, baseIndent);
+            formattedContent = formatBlockContent(blockContent, baseIndent, config);
         }
 
         // Reconstruct the formatted block
@@ -690,22 +693,17 @@ const parseInlineObject = (objectType, baseIndent) => {
  * @param {string} alignedFirstLine - The first line with proper key alignment
  * @returns {string[]} The formatted method lines
  */
-const formatMethodSignature = (methodLines, propertyIndent, alignedFirstLine) => {
+const formatMethodSignature = (methodLines, propertyIndent, alignedFirstLine, config = {}) => {
     const formattedLines = [];
 
+
     // Always format methods with multi-line parameters for consistency
-    // Even single-line methods should be expanded
-    
-    // For single-line methods, force multi-line format
-    if (methodLines.length === 1) {
-        // Extract everything we need from the single line
-        const singleLine = methodLines[0];
-        // The alignedFirstLine already has the proper formatting up to the colon
-    }
+    // All methods should be expanded to multi-line format when EXPAND_METHODS is true
+    const shouldExpand = config.EXPAND_METHODS !== false; // Default to true
 
 
     // Extract the aligned method name part from the first line
-    const colonIndex = alignedFirstLine.indexOf(" : ");
+    const colonIndex = alignedFirstLine.indexOf(":");
     if (colonIndex === -1) {
         // Fallback: just indent properly
         formattedLines.push(alignedFirstLine);
@@ -715,149 +713,129 @@ const formatMethodSignature = (methodLines, propertyIndent, alignedFirstLine) =>
         return formattedLines;
     }
 
-    const methodNamePart = alignedFirstLine.substring(0, colonIndex);
+    // Extract the method name part (everything before the parenthesis)
+    const methodNameMatch = alignedFirstLine.match(/^(\s*\w+(?:<[^>]+>)?)\s*\(/);
+    if (!methodNameMatch) {
+        // Fallback if pattern doesn't match
+        return [alignedFirstLine];
+    }
 
-    // Combine all lines and normalize whitespace
-    const fullSignature = methodLines.map(line => line.trim()).join(" ").replace(/\s+/g, " ");
+    const methodIndentAndName = methodNameMatch[1];
+    const methodIndent = methodIndentAndName.match(/^\s*/)[0]; // Extract just the indent
 
-    // Extract the signature part after the key
-    const signatureMatch = fullSignature.match(/:\s*(.+)$/);
+    // Extract the full signature from the original line
+    const fullSignature = methodLines[0].trim();
+
+    // Find the parameters and return type
+    const signatureMatch = fullSignature.match(/\(([^)]*)\)\s*:\s*(.+)$/);
     if (!signatureMatch) {
-        return methodLines.map((line, i) =>
-            i === 0 ? alignedFirstLine : propertyIndent + "    " + line.trim(),
-        );
+        return [alignedFirstLine];
     }
 
-    const signature = signatureMatch[1];
+    const [, paramsContent, returnTypeWithSemi] = signatureMatch;
+    const returnType = returnTypeWithSemi.replace(/;$/, "");
 
-    // Find opening parenthesis
-    const openParenIndex = signature.indexOf("(");
-    if (openParenIndex === -1) {
-        // Not a method signature
-        return methodLines.map((line, i) =>
-            i === 0 ? alignedFirstLine : propertyIndent + "    " + line.trim(),
-        );
-    }
-
-    // Extract method name/generics and the rest
-    const methodPrefix = signature.substring(0, openParenIndex);
-
-    // Find the matching closing parenthesis
-    let parenDepth = 0;
-    let closeParenIndex = -1;
-    for (let i = openParenIndex; i < signature.length; i++) {
-        if (signature[i] === "(") parenDepth++;
-        else if (signature[i] === ")") {
-            parenDepth--;
-            if (parenDepth === 0) {
-                closeParenIndex = i;
-                break;
-            }
-        }
-    }
-
-    if (closeParenIndex === -1) {
-        // Malformed signature
-        return methodLines.map((line, i) =>
-            i === 0 ? alignedFirstLine : propertyIndent + "    " + line.trim(),
-        );
-    }
-
-    const parametersStr = signature.substring(openParenIndex + 1, closeParenIndex);
-    const returnType = signature.substring(closeParenIndex + 1);
-
-    // Start building the formatted output - add space before opening paren
-    // Handle generic parameters properly
-    const genericMatch = methodPrefix.match(/^(.+?)(<.+>)$/);
-    if (genericMatch) {
-        formattedLines.push(`${methodNamePart} : ${genericMatch[1]}${genericMatch[2]} (`);
-    } else {
-        formattedLines.push(`${methodNamePart} : ${methodPrefix} (`);
-    }
+    // Start building the formatted output
+    formattedLines.push(`${methodIndentAndName} (`);
 
     // Parse and format parameters
-    if (parametersStr.trim()) {
-        const parameters = parseParameters(parametersStr);
-        const paramIndent = propertyIndent + "    ";
+    if (paramsContent.trim()) {
+        const parameters = parseParameters(paramsContent);
 
-        // Calculate max lengths for alignment
-        let maxParamLength = 0;
-        let hasOptional = false;
+        // If we have parameters and should expand, or if already multi-line, format them
+        if ((parameters.length > 0 && shouldExpand
+        ) || methodLines.length > 1) {
+            // Parameters should be indented properly (method indent + 4 spaces)
+            const paramIndent = methodIndent + "    ";
 
-        for (const param of parameters) {
-            maxParamLength = Math.max(maxParamLength, param.name.length);
-            if (param.optional) hasOptional = true;
-        }
+            // Calculate max lengths for alignment
+            let maxParamLength = 0;
+            let hasOptional = false;
 
-        // Format each parameter
-        parameters.forEach((param, index) => {
-            let line = paramIndent + param.name.padEnd(maxParamLength);
-
-            if (hasOptional) {
-                line += param.optional ? " ?" : "  ";
+            for (const param of parameters) {
+                maxParamLength = Math.max(maxParamLength, param.name.length);
+                if (param.optional) hasOptional = true;
             }
 
-            line += " : " + param.type;
+            // Format each parameter with proper alignment
+            parameters.forEach((param, index) => {
+                let line = paramIndent + param.name.padEnd(maxParamLength);
 
-            // Check if parameter type contains an inline object
-            if (param.type.includes("{") && param.type.includes("}")) {
-                // Format inline object types
-                const braceIndex = param.type.indexOf("{");
-                const beforeBrace = param.type.substring(0, braceIndex).trim();
-                const objectContent = param.type.substring(braceIndex);
+                if (hasOptional) {
+                    line += " " + (param.optional ? "?" : " "
+                    );
+                }
 
-                // Extract properties from the inline object
-                const objMatch = objectContent.match(/^\{(.+)\}(.*)$/);
-                if (objMatch) {
-                    const props = objMatch[1].trim();
-                    const afterObj = objMatch[2];
+                // Don't add the type yet if it's an inline object
 
-                    // Add the parameter line with opening brace
-                    formattedLines.push(line.substring(0, line.lastIndexOf(":") + 1) + " " + beforeBrace + " {");
+                // Check if parameter type contains an inline object
+                if (param.type.includes("{") && param.type.includes("}")) {
+                    // Format inline object types
+                    const braceIndex = param.type.indexOf("{");
+                    const beforeBrace = param.type.substring(0, braceIndex).trim();
+                    const afterBraceIndex = param.type.lastIndexOf("}");
+                    const objectContent = param.type.substring(braceIndex + 1, afterBraceIndex).trim();
+                    const afterObject = param.type.substring(afterBraceIndex + 1).trim();
 
-                    // Parse and format object properties
-                    const objPropIndent = paramIndent + "        ";
-                    const properties = props.split(/[;,]/).filter(p => p.trim());
-
-                    // Calculate alignment for object properties
-                    let maxPropLength = 0;
-                    const parsedProps = [];
-
-                    for (const prop of properties) {
-                        const colonIdx = prop.indexOf(":");
-                        if (colonIdx > 0) {
-                            const propName = prop.substring(0, colonIdx).trim();
-                            const propType = prop.substring(colonIdx + 1).trim();
-                            maxPropLength = Math.max(maxPropLength, propName.length);
-                            parsedProps.push({ name : propName, type : propType });
+                    if (objectContent) {
+                        // Add the parameter line with opening brace
+                        // Build the line with just the parameter name and optional marker
+                        if (beforeBrace) {
+                            formattedLines.push(line + " : " + beforeBrace + " {");
+                        } else {
+                            formattedLines.push(line + " : {");
                         }
+
+                        // Parse and format object properties
+                        // Object properties should be indented one level from the brace
+                        const objPropIndent = paramIndent + "    ";
+                        const properties = objectContent.split(/[;,]/).filter(p => p.trim());
+
+                        // Calculate alignment for object properties
+                        let maxPropLength = 0;
+                        const parsedProps = [];
+
+                        for (const prop of properties) {
+                            const colonIdx = prop.indexOf(":");
+                            if (colonIdx > 0) {
+                                const propName = prop.substring(0, colonIdx).trim();
+                                const propType = prop.substring(colonIdx + 1).trim();
+                                maxPropLength = Math.max(maxPropLength, propName.length);
+                                parsedProps.push({ name : propName, type : propType });
+                            }
+                        }
+
+                        // Format object properties with alignment
+                        parsedProps.forEach((prop, propIndex) => {
+                            const isLastProp = propIndex === parsedProps.length - 1;
+                            formattedLines.push(
+                                `${objPropIndent}${prop.name.padEnd(maxPropLength)} : ${prop.type}${isLastProp ? "" : ";"}`,
+                            );
+                        });
+
+                        // Close the object
+                        formattedLines.push(`${paramIndent}}${afterObject}${index < parameters.length - 1 ? "," : ""}`);
+                    } else {
+                        // Fallback for complex cases
+                        formattedLines.push(line + (index < parameters.length - 1 ? "," : ""
+                        ));
                     }
-
-                    // Format object properties with alignment
-                    parsedProps.forEach((prop, propIndex) => {
-                        const isLastProp = propIndex === parsedProps.length - 1;
-                        formattedLines.push(
-                            `${objPropIndent}${prop.name.padEnd(maxPropLength)} : ${prop.type}${isLastProp ? "" : ";"}`,
-                        );
-                    });
-
-                    // Close the object
-                    formattedLines.push(`${paramIndent}    }${afterObj}${index < parameters.length - 1 ? "," : ""}`);
                 } else {
-                    // Fallback for complex cases
+                    // Regular parameter without inline object
+                    line += " : " + param.type;
                     formattedLines.push(line + (index < parameters.length - 1 ? "," : ""
                     ));
                 }
-            } else {
-                // Regular parameter without inline object
-                formattedLines.push(line + (index < parameters.length - 1 ? "," : ""
-                ));
-            }
-        });
+            });
+        } else {
+            // Keep single-line format if not expanding
+            formattedLines[0] = alignedFirstLine;
+            return formattedLines;
+        }
     }
 
     // Close parentheses and add return type
-    formattedLines.push(`${propertyIndent})${returnType}`);
+    formattedLines.push(`${methodIndent}): ${returnType};`);
 
     return formattedLines;
 };
@@ -868,7 +846,7 @@ const formatMethodSignature = (methodLines, propertyIndent, alignedFirstLine) =>
  * @param {string} baseIndent - The base indentation of the parent block.
  * @returns {string[]} The formatted lines of code.
  */
-const formatBlockContent = (blockContentLines, baseIndent) => {
+const formatBlockContent = (blockContentLines, baseIndent, config = {}) => {
     const properties = [];
     let currentPropLines = [];
     let braceDepth = 0;
@@ -992,7 +970,47 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
             continue;
         }
 
-        const match = trimmedFirstLine.match(/^(\[.+?\]|[\w$]+)(\s*\?)?\s*:\s*(.*)$/);
+        // Match both regular properties and method signatures
+        // For methods: name(params): type
+        // For properties: name: type
+        // Need to handle nested parentheses in parameters
+        let match = null;
+
+        // First try to match as a method with parentheses
+        const methodMatch = trimmedFirstLine.match(/^([\w$]+(?:<[^>]+>)?)\s*\(/);
+        if (methodMatch) {
+            // This is a method, extract name and find the matching closing paren
+            const methodName = methodMatch[1];
+            let parenDepth = 0;
+            let closingParenIndex = -1;
+
+            for (let i = methodMatch[0].length - 1; i < trimmedFirstLine.length; i++) {
+                if (trimmedFirstLine[i] === "(") parenDepth++;
+                else if (trimmedFirstLine[i] === ")") {
+                    parenDepth--;
+                    if (parenDepth === 0) {
+                        closingParenIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            if (closingParenIndex !== -1) {
+                const params = trimmedFirstLine.substring(methodMatch[0].length - 1, closingParenIndex + 1);
+                const rest = trimmedFirstLine.substring(closingParenIndex + 1);
+                const typeMatch = rest.match(/^\s*:\s*(.*)$/);
+                if (typeMatch) {
+                    match = [trimmedFirstLine, methodName, params, null, typeMatch[1]];
+                }
+            }
+        } else {
+            // Try to match as a property
+            match = trimmedFirstLine.match(/^([\w$]+(?:<[^>]+>)?)\s*(\?)?\s*:\s*(.*)$/);
+            if (match) {
+                // Reformat to match expected structure: [full, name, params, optional, type]
+                match = [match[0], match[1], null, match[2], match[3]];
+            }
+        }
 
         if (!match) {
             // Should not happen often with the new property splitter, but as a fallback:
@@ -1000,29 +1018,36 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
             continue;
         }
 
-        const [, key, optional, value] = match;
+        const [, key, params, optional, value] = match;
 
-        // Check if this is a method (contains parentheses)
-        const isMethod = value.includes("(") || (prop.length > 1 && prop.some(line => line.includes("(")));
+        // For methods, include the params in the value
+        const fullValue = params ? params + " : " + value : value;
+
+        // Check if this is a method (has params)
+        // Force all methods to be formatted as multi-line
+        const isMethod = !!params;
+
 
         // Add spacing before methods (except the first property)
         if (isMethod && propIndex > 0 && formattedLines.length > 0) {
             formattedLines.push("");
         }
         const paddedKey = key.padEnd(maxKeyLength);
-        // For methods, we need to add space before the parenthesis
-        let formattedValue = value;
-        if (isMethod) {
-            // Add space before opening parenthesis if not already present
-            formattedValue = value.replace(/(\S)\(/, '$1 (');
+        // For methods, format differently than properties
+        let alignedFirstLine;
+        if (isMethod && params) {
+            // Methods: name (params): returnType
+            const methodWithSpace = params.replace(/^\(/, " (");
+            alignedFirstLine = `${propertyIndent}${paddedKey}${methodWithSpace}: ${value}`;
+        } else {
+            // Properties: name : type
+            alignedFirstLine = `${propertyIndent}${paddedKey}${hasOptional ? (optional ? " ?" : "  "
+            ) : ""} : ${fullValue}`;
         }
-        
-        const alignedFirstLine = `${propertyIndent}${paddedKey}${hasOptional ? (optional ? " ?" : "  "
-        ) : ""} : ${formattedValue}`;
 
         if (isMethod) {
             // Always use method formatter for methods
-            const methodFormattedLines = formatMethodSignature(prop, propertyIndent, alignedFirstLine);
+            const methodFormattedLines = formatMethodSignature(prop, propertyIndent, alignedFirstLine, config);
             formattedLines.push(...methodFormattedLines);
         } else if (prop.length === 1) {
             formattedLines.push(alignedFirstLine);
@@ -1033,7 +1058,7 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
             if (openingBraceIndex === -1) {
                 // This is not a nested object, but a multi-line signature or other construct.
                 // Use the method signature formatter
-                const methodFormattedLines = formatMethodSignature(prop, propertyIndent, alignedFirstLine);
+                const methodFormattedLines = formatMethodSignature(prop, propertyIndent, alignedFirstLine, config);
                 formattedLines.push(...methodFormattedLines);
             } else {
                 // This is a nested object. Format it recursively.
@@ -1042,7 +1067,7 @@ const formatBlockContent = (blockContentLines, baseIndent) => {
 
                 const nestedContent = prop.slice(1, -1);
                 if (nestedContent.length > 0) {
-                    const formattedNestedContent = formatBlockContent(nestedContent, propertyIndent);
+                    const formattedNestedContent = formatBlockContent(nestedContent, propertyIndent, config);
                     formattedLines.push(...formattedNestedContent);
                 }
 
@@ -1094,7 +1119,7 @@ const processFile = (filePath) => {
 
         // Step 2: Extract interface/type blocks and get their lines to remove
         const { interfaceBlocks, linesToRemove : interfaceLinesToRemove } = extractInterfaceBlocks(originalCode);
-        
+
 
         // Combine all lines to remove (imports + interfaces)
         const allLinesToRemove = new Set([...importLinesToRemove, ...interfaceLinesToRemove]);
@@ -1114,7 +1139,7 @@ const processFile = (filePath) => {
         const newImportLines = importStatements.length > 0 ? groupAndFormatImports(importStatements, config) : [];
 
         // Step 4: Get the formatted interface blocks
-        const formattedInterfaceBlocks = interfaceBlocks.length > 0 ? formatInterfaceBlocks(interfaceBlocks, lines) : [];
+        const formattedInterfaceBlocks = interfaceBlocks.length > 0 ? formatInterfaceBlocks(interfaceBlocks, lines, config) : [];
 
         // Step 5: Reconstruct the file
         const finalLines = [];
@@ -1123,7 +1148,7 @@ const processFile = (filePath) => {
         let headerEndIndex = 0;
         let foundFirstImport = false;
         let foundFirstInterface = false;
-        
+
         for (let i = 0; i < lines.length; i++) {
             const trimmedLine = lines[i].trim();
 
@@ -1132,7 +1157,7 @@ const processFile = (filePath) => {
                 foundFirstImport = true;
                 break;
             }
-            
+
             // Check if this is an interface/type line
             if (interfaceLinesToRemove.has(i)) {
                 foundFirstInterface = true;
