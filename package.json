@@ -1,10 +1,16 @@
 {
-    "name"        : "serisei-formatter",
-    "version"     : "0.1.0",
-    "description" : "A very opinionated pseudo-formatter that groups and sorts import statements and column-indents TypeScript types, interfaces, and objects.",
-    "bin"         : {
+    "name"         : "serisei-formatter",
+    "version"      : "0.1.1",
+    "description"  : "A very opinionated pseudo-formatter that groups and sorts import statements and column-indents TypeScript types, interfaces, and objects.",
+    "bin"          : {
         "serisei" : "./serisei-formatter.js"
     },
-    "author"      : "",
-    "license"     : "ISC"
+    "dependencies" : {
+        "@babel/parser"    : "^7.23.0",
+        "@babel/traverse"  : "^7.23.0",
+        "@babel/generator" : "^7.23.0",
+        "@babel/types"     : "^7.23.0"
+    },
+    "author"       : "",
+    "license"      : "ISC"
 }

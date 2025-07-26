@@ -3,6 +3,9 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { parse } = require("@babel/parser");
+const traverse = require("@babel/traverse").default;
+const generate = require("@babel/generator").default;
 
 /**
  * Loads configuration by searching upwards from a starting directory for a .seriseirc file.
@@ -15,7 +18,8 @@ const loadConfig = (startPath) => {
         HEADER_CHAR     : "=",
         TO_COLUMN_WIDTH : 120,
         groups          : [
-            { name       : "// EXTERNAL ",
+            {
+                name     : "// EXTERNAL ",
                 matchers : [
                     "\"react\"",
                     "'react'",
@@ -31,7 +35,7 @@ const loadConfig = (startPath) => {
                     "tauri",
                     "react-router-dom",
                     "@react-oauth/google",
-                    "globby"
+                    "globby",
                 ],
             },
             { name : "// FICTOAN ", matchers : ["fictoan-react"] },
@@ -137,84 +141,118 @@ const loadConfig = (startPath) => {
 };
 
 /**
- * Extracts import statements and their location from an array of lines.
- * The "import block" is defined as the contiguous section from the first
- * import statement or generated header until the first line of other code.
- * @param {string[]} lines - The lines of the file.
- * @param {object} config - The configuration object.
- * @returns {{importStatements: string[], importStart: number, importEnd: number}}
+ * AST-based import extraction function.
+ * Collects ALL imports and identifies the exact lines they occupy.
+ * @param {string} code - The source code content
+ * @param {object} config - The configuration object
+ * @returns {{importStatements: string[], linesToRemove: Set<number>}}
  */
-const extractImports = (lines, config) => {
-    const { HEADER_CHAR } = config;
-    const headerRegex = new RegExp(`^\\s*//.*\\s[${HEADER_CHAR}]`);
-    const importStatements = [];
-    let importStart = -1;
-    let importEnd = -1;
-    let commentBuffer = [];
-    let inBlock = false;
+const extractImports = (code, config) => {
+    try {
+        const ast = parse(code, {
+            sourceType : "module",
+            plugins    : [
+                "typescript",
+                "jsx",
+                "decorators-legacy",
+                "classProperties",
+                "objectRestSpread",
+                "asyncGenerators",
+                "functionBind",
+                "exportDefaultFrom",
+                "exportNamespaceFrom",
+                "dynamicImport",
+                "nullishCoalescingOperator",
+                "optionalChaining",
+            ],
+        });
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const trimmedLine = line.trim();
+        const importNodes = [];
+        const linesToRemove = new Set();
+        let firstImportLine = -1;
+        let lastImportLine = -1;
 
-        // Find the start of the block. It can be a header or an import.
-        if (!inBlock && (headerRegex.test(trimmedLine) || trimmedLine.startsWith("import")
-        )) {
-            importStart = i;
-            inBlock = true;
+        traverse(ast, {
+            ImportDeclaration(path) {
+                const node = path.node;
+                importNodes.push(node);
+                // Track the first and last import lines
+                const importStartLine = node.loc.start.line - 1; // Convert to 0-based
+                const importEndLine = node.loc.end.line - 1; // Convert to 0-based
+                
+                if (firstImportLine === -1 || importStartLine < firstImportLine) {
+                    firstImportLine = importStartLine;
+                }
+                if (lastImportLine === -1 || importEndLine > lastImportLine) {
+                    lastImportLine = importEndLine;
+                }
+                
+                // Add every line occupied by this import to the set for removal.
+                for (let i = importStartLine; i <= importEndLine; i++) {
+                    linesToRemove.add(i);
+                }
+            },
+        });
+
+        if (importNodes.length === 0) {
+            return { importStatements : [], linesToRemove : new Set() };
         }
 
-        if (!inBlock) continue;
-
-        // Once in the block, we only care about collecting pure import statements.
-        // Headers and empty lines within the block are ignored for collection but extend the block.
-
-        if (headerRegex.test(trimmedLine)) {
-            commentBuffer = []; // A header clears any preceding comments.
-            continue;
-        }
-
-        if (trimmedLine.startsWith("//") || trimmedLine.startsWith("/*")) {
-            commentBuffer.push(line);
-            continue;
-        }
-
-        if (trimmedLine.startsWith("import ")) {
-            let currentImportLines = [...commentBuffer, line];
-            commentBuffer = [];
-            let braceDepth = (trimmedLine.match(/\{/g) || []
-            ).length - (trimmedLine.match(/\}/g) || []
-            ).length;
-
-            if (!trimmedLine.endsWith(";") || braceDepth > 0) {
-                for (let j = i + 1; j < lines.length; j++) {
-                    const nextLine = lines[j];
-                    currentImportLines.push(nextLine);
-                    braceDepth += (nextLine.match(/\{/g) || []
-                    ).length;
-                    braceDepth -= (nextLine.match(/\}/g) || []
-                    ).length;
-                    if (nextLine.includes(";") && braceDepth <= 0) {
-                        i = j; // Move outer loop cursor forward
-                        break;
-                    }
+        // Expand linesToRemove to include the entire import block
+        // This includes all lines from the first import to the last import,
+        // including any comments or empty lines in between
+        if (firstImportLine !== -1 && lastImportLine !== -1) {
+            const lines = code.split("\n");
+            // Look for generated headers or comments that are part of the import block
+            // Start from the line before the first import, but only include
+            // empty lines and generated headers (not regular comments)
+            let blockStart = firstImportLine;
+            for (let i = firstImportLine - 1; i >= 0; i--) {
+                const line = lines[i].trim();
+                const headerRegex = new RegExp(`^\\s*//.*\\s[${config.HEADER_CHAR}]`);
+                if (line === "") {
+                    blockStart = i;
+                } else if (headerRegex.test(line)) {
+                    // This is a generated header, include it
+                    blockStart = i;
+                } else {
+                    // This is a regular comment or code, stop here
+                    break;
                 }
             }
-            importStatements.push(currentImportLines.join("\n"));
-        } else if (trimmedLine !== "") {
-            // This is the first line of code after the imports.
-            importEnd = i;
-            break; // Exit the loop, we are done with the import block.
+            
+            // Look for the end of the import block
+            let blockEnd = lastImportLine;
+            for (let i = lastImportLine + 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line === "" || line.startsWith("//") || line.startsWith("/*")) {
+                    blockEnd = i;
+                } else {
+                    break;
+                }
+            }
+            
+            // Add all lines in the import block to linesToRemove
+            for (let i = blockStart; i <= blockEnd; i++) {
+                linesToRemove.add(i);
+            }
         }
-        // If we are here, it was an empty line. Just continue, it's part of the block.
-    }
 
-    if (importStart !== -1 && importEnd === -1) {
-        // This means the file ended while we were still in the import block.
-        importEnd = lines.length;
-    }
+        // Generate the import code strings from the collected AST nodes
+        // Remove leading comments to avoid duplicating file headers
+        const importStatements = importNodes.map((node) => {
+            // Clear leading comments to prevent duplication
+            const nodeCopy = { ...node, leadingComments: null };
+            return generate(nodeCopy, { compact : false }).code;
+        });
 
-    return { importStatements, importStart, importEnd };
+        return { importStatements, linesToRemove };
+
+    } catch (error) {
+        console.error(`Failed to parse file with AST: ${error.message}`);
+        // Return empty results on parse error
+        return { importStatements: [], linesToRemove: new Set() };
+    }
 };
 
 /**
@@ -403,7 +441,7 @@ const writeFileAtomic = (filePath, content) => {
 
 /**
  * Read the file, apply formatting, and write back if changed.
- * This version processes the file in a single pass to avoid cascading errors.
+ * This version uses the AST to remove all imports and re-insert a formatted block at the top.
  * @param {string} filePath The path of the file to process.
  */
 const processFile = (filePath) => {
@@ -412,10 +450,10 @@ const processFile = (filePath) => {
         const originalCode = fs.readFileSync(filePath, "utf8");
         const lines = originalCode.split("\n");
 
-        // Step 1: Extract import information
-        const { importStatements, importStart, importEnd } = extractImports(lines, config);
+        // Step 1: Extract imports and get the set of lines to remove
+        const { importStatements, linesToRemove } = extractImports(originalCode, config);
 
-        if (importStart === -1) {
+        if (importStatements.length === 0) {
             // No imports found, no need to format anything.
             return;
         }
@@ -423,22 +461,62 @@ const processFile = (filePath) => {
         // Step 2: Get the formatted import block
         const newImportLines = groupAndFormatImports(importStatements, config);
 
-        // Step 3: Reconstruct the file, formatting types/interfaces along the way
+        // Step 3: Reconstruct the file
         const finalLines = [];
 
-        // Add lines before the import block
-        finalLines.push(...lines.slice(0, importStart));
+        // Find the end of the file header (comments/empty lines/directives at the top)
+        let headerEndIndex = 0;
+        let foundFirstImport = false;
+        for (let i = 0; i < lines.length; i++) {
+            const trimmedLine = lines[i].trim();
+            
+            // Check if this is an import line
+            if (linesToRemove.has(i) && trimmedLine.startsWith("import")) {
+                foundFirstImport = true;
+            }
+            
+            // Check if this is a directive (string literal at the top level)
+            const isDirective = /^["']use (client|server|strict)["'];?$/.test(trimmedLine);
+            
+            // Stop at the first import or first non-comment/non-directive code
+            if (foundFirstImport || (trimmedLine !== "" && !trimmedLine.startsWith("//") && !trimmedLine.startsWith("/*") && !isDirective && !linesToRemove.has(i))) {
+                break;
+            }
+            
+            if (!linesToRemove.has(i)) {
+                finalLines.push(lines[i]);
+            }
+            headerEndIndex = i + 1;
+        }
 
-        // Add the new formatted import block
-        finalLines.push(...newImportLines);
+        // Inject the new import block
+        if (newImportLines.length > 0) {
+            // If the header already ends with a blank line, don't add another.
+            if (finalLines.length > 0 && finalLines[finalLines.length - 1].trim() !== "") {
+                finalLines.push("");
+            }
+            finalLines.push(...newImportLines);
+        }
 
-        // Ensure there's a blank line after imports if the next line isn't already blank.
-        if (newImportLines.length > 0 && importEnd < lines.length && lines[importEnd] && lines[importEnd].trim() !== "") {
+        // Check if there is subsequent code to add a separator line
+        let hasSubsequentCode = false;
+        for (let i = headerEndIndex; i < lines.length; i++) {
+            if (!linesToRemove.has(i) && lines[i].trim() !== "") {
+                hasSubsequentCode = true;
+                break;
+            }
+        }
+
+        if (newImportLines.length > 0 && hasSubsequentCode) {
             finalLines.push("");
         }
 
-        // Process the rest of the file
-        for (let i = importEnd; i < lines.length; i++) {
+        // Process the rest of the file, skipping old import lines
+        for (let i = headerEndIndex; i < lines.length; i++) {
+            if (linesToRemove.has(i)) {
+                continue;
+            }
+
             const line = lines[i];
             const isBlockStart = /^\s*(export\s+)?(interface|type)\s+[\w$]+.*\{/.test(line.trim());
 
@@ -447,15 +525,18 @@ const processFile = (filePath) => {
                 continue;
             }
 
+            // The rest of this logic is the original, known-good type/interface formatter
             const baseIndent = (line.match(/^\s*/) || [""]
             )[0];
             let braceDepth = 0;
             let blockEndIndex = -1;
             for (let j = i; j < lines.length; j++) {
-                braceDepth += (lines[j].match(/\{/g) || []
-                ).length;
-                braceDepth -= (lines[j].match(/\}/g) || []
-                ).length;
+                if (!linesToRemove.has(j)) { // Ensure we don't look inside an old import
+                    braceDepth += (lines[j].match(/\{/g) || []
+                    ).length;
+                    braceDepth -= (lines[j].match(/\}/g) || []
+                    ).length;
+                }
                 if (braceDepth === 0) {
                     blockEndIndex = j;
                     break;
@@ -469,10 +550,17 @@ const processFile = (filePath) => {
 
             const blockHeader = lines[i];
             const blockFooter = lines[blockEndIndex];
-            const blockContent = lines.slice(i + 1, blockEndIndex);
+
+            // Extract content, making sure to skip any import lines that might be inside
+            const blockContent = [];
+            for (let k = i + 1; k < blockEndIndex; k++) {
+                if (!linesToRemove.has(k)) {
+                    blockContent.push(lines[k]);
+                }
+            }
 
             finalLines.push(blockHeader);
-            if (blockContent.some(l => l.trim() !== "")) {
+            if (blockContent.some((l) => l.trim() !== "")) {
                 finalLines.push(...formatBlockContent(blockContent, baseIndent));
             } else {
                 finalLines.push(...blockContent);
