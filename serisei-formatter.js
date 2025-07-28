@@ -163,30 +163,8 @@ const processFile = (filePath) => {
                 continue;
             }
 
-            // Check if this is a duplicate generated header that should be removed
-            const trimmedLine = lines[i].trim();
-            const headerRegex = new RegExp(`^\\s*//.*\\s[${workingConfig.HEADER_CHAR}]{3,}`);
-            const isGeneratedHeader = headerRegex.test(trimmedLine);
-
-            // Skip duplicate headers that appear after imports
-            // These can occur when the file was previously formatted
-            if (isGeneratedHeader && i > lastImportLine) {
-                // Check if this is followed by empty lines and then code (not an import)
-                let nextNonEmptyLine = i + 1;
-                while (nextNonEmptyLine < lines.length && lines[nextNonEmptyLine].trim() === "") {
-                    nextNonEmptyLine++;
-                }
-
-                // If the next non-empty line exists and is not an import, this is a stray header
-                if (nextNonEmptyLine < lines.length) {
-                    const nextLine = lines[nextNonEmptyLine].trim();
-                    if (!nextLine.startsWith("import ") && !nextLine.startsWith("export ") &&
-                        !nextLine.startsWith("interface ") && !nextLine.startsWith("type ")) {
-                        i++;
-                        continue;
-                    }
-                }
-            }
+            // Generated headers are now handled by the AST parser's linesToRemove set
+            // No additional logic needed here
 
             // For all other lines, just add them as-is
             finalLines.push(lines[i]);
