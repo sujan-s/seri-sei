@@ -1,3 +1,6 @@
+## v0.1.4
+#### Fix interface properties formatting with multi-line arrow function types
+
 ## v0.1.3
 #### Break monolithic file into multiple modules
 
