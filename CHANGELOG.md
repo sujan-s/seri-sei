@@ -1,3 +1,6 @@
+## v0.1.5
+#### Add support for multi-line union types
+
 ## v0.1.4
 #### Fix interface properties formatting with multi-line arrow function types
 

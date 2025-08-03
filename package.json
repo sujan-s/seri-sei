@@ -1,6 +1,6 @@
 {
     "name"         : "serisei-formatter",
-    "version"      : "0.1.2",
+    "version"      : "0.1.5",
     "description"  : "A very opinionated pseudo-formatter that groups and sorts import statements and column-indents TypeScript types, interfaces, and objects.",
     "bin"          : {
         "serisei" : "./serisei-formatter.js"
